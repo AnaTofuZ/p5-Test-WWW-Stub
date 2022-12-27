@@ -9,9 +9,12 @@ use Carp ();
 use Guard;  # guard
 use LWP::Protocol::PSGI;
 use Plack::Request;
+use Plack::Response;
 use Test::More ();
 use List::MoreUtils ();
 use URI;
+use LWP::UserAgent;
+use HTTP::Request;
 
 use Test::WWW::Stub::Intercepter;
 
@@ -20,16 +23,28 @@ our @Requests;
 
 my $register_g;
 my $app;
+my $ignore_stub_urls;
 sub _app { $app; }
 
 $app = sub {
     my ($env) = @_;
     my $req = Plack::Request->new($env);
 
-    push @Requests, $req;
-
     my $uri = _normalize_uri($req->uri);
+    if (List::MoreUtils::any(sub {
+        _is_matching_ignore_url($_, $uri)
+    }, @$ignore_stub_urls)) {
+        {
+            my $local_unregister = LWP::Protocol::PSGI->unregister;
+            my $ua = LWP::UserAgent->new;
+            my $http_req = HTTP::Request->new($req->method, $req->uri, $req->headers, $req->content);
+            my $http_res = $ua->request($http_req);
+            my $plack_res = Plack::Response->new($http_res->code, $http_res->headers, $http_res->content);
+            return $plack_res->finalize;
+        }
+    }
 
+    push @Requests, $req;
     my $stubbed_res = $Intercepter->intercept($uri, $env, $req);
     return $stubbed_res if $stubbed_res;
 
@@ -42,7 +57,18 @@ $app = sub {
 };
 
 sub import {
+    my ($class, %options) = @_;
+    $ignore_stub_urls = $options{ignore_stub_urls} // [];
     $register_g //= LWP::Protocol::PSGI->register($app);
+}
+
+sub _is_matching_ignore_url  {
+    my ($uri_or_re, $uri) = @_;
+    if (ref($uri_or_re) ne 'Regexp') {
+        return $uri eq $uri_or_re ? 1 : 0
+    }
+    my @captures = $uri =~ m/$uri_or_re/;
+    return @captures > 0 ? 1 : 0;
 }
 
 sub register {
